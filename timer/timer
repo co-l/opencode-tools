@@ -8,6 +8,20 @@ SESSION_DIR="${STORAGE_DIR}/session"
 MESSAGE_DIR="${STORAGE_DIR}/message"
 PART_DIR="${STORAGE_DIR}/part"
 CWD="$(pwd)"
+VERBOSE=false
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -v|--verbose) VERBOSE=true; shift ;;
+        -h|--help)
+            echo "Usage: timer [-v|--verbose]"
+            echo "  -v, --verbose  Show detailed token breakdown with explanations"
+            exit 0
+            ;;
+        *) shift ;;
+    esac
+done
 
 # Format milliseconds as hh:mm:ss
 format_time() {
@@ -17,6 +31,11 @@ format_time() {
     local minutes=$(((total_seconds % 3600) / 60))
     local seconds=$((total_seconds % 60))
     printf "%02d:%02d:%02d" "$hours" "$minutes" "$seconds"
+}
+
+# Format large numbers with commas (e.g., 125432 -> 125,432)
+format_number() {
+    printf "%'d" "$1"
 }
 
 # Find all sessions for the current directory
@@ -55,19 +74,24 @@ get_question_wait_time() {
     echo "$wait_time"
 }
 
-# Calculate total thinking time and prompt count for a session
-# Returns: "time_ms:prompt_count"
+# Calculate total thinking time, prompt count, and token stats for a session
+# Returns: "time_ms:prompt_count:input:output:reasoning:cache_read:cache_write"
 calculate_session_stats() {
     local session_id=$1
     local session_msg_dir="${MESSAGE_DIR}/${session_id}"
     
     if [[ ! -d "$session_msg_dir" ]]; then
-        echo "0:0"
+        echo "0:0:0:0:0:0:0"
         return
     fi
     
     local total_ms=0
     local prompt_count=0
+    local total_input=0
+    local total_output=0
+    local total_reasoning=0
+    local total_cache_read=0
+    local total_cache_write=0
     
     for msg_file in "$session_msg_dir"/*.json; do
         [[ -f "$msg_file" ]] || continue
@@ -82,9 +106,21 @@ calculate_session_stats() {
             [[ -n "$has_summary" ]] && ((prompt_count++))
         elif [[ "$role" == "assistant" ]]; then
             # Ignore messages with no output tokens (e.g., !command results)
-            local tokens_output
+            local tokens_output tokens_input tokens_reasoning cache_read cache_write
+            tokens_input=$(jq -r '.tokens.input // 0' "$msg_file" 2>/dev/null)
             tokens_output=$(jq -r '.tokens.output // 0' "$msg_file" 2>/dev/null)
+            tokens_reasoning=$(jq -r '.tokens.reasoning // 0' "$msg_file" 2>/dev/null)
+            cache_read=$(jq -r '.tokens.cache.read // 0' "$msg_file" 2>/dev/null)
+            cache_write=$(jq -r '.tokens.cache.write // 0' "$msg_file" 2>/dev/null)
+            
             [[ "$tokens_output" -eq 0 ]] && continue
+            
+            # Accumulate token stats
+            total_input=$((total_input + tokens_input))
+            total_output=$((total_output + tokens_output))
+            total_reasoning=$((total_reasoning + tokens_reasoning))
+            total_cache_read=$((total_cache_read + cache_read))
+            total_cache_write=$((total_cache_write + cache_write))
             
             local time_created time_completed msg_id
             time_created=$(jq -r '.time.created // 0' "$msg_file" 2>/dev/null)
@@ -103,7 +139,7 @@ calculate_session_stats() {
         fi
     done
     
-    echo "${total_ms}:${prompt_count}"
+    echo "${total_ms}:${prompt_count}:${total_input}:${total_output}:${total_reasoning}:${total_cache_read}:${total_cache_write}"
 }
 
 # Main
@@ -127,10 +163,12 @@ main() {
         created=$(jq -r '.time.created // 0' "$session_file")
         updated=$(jq -r '.time.updated // 0' "$session_file")
         
-        local stats total_ms prompt_count
+        local stats
         stats=$(calculate_session_stats "$session_id")
-        total_ms="${stats%%:*}"
-        prompt_count="${stats##*:}"
+        
+        # Parse stats: time_ms:prompt_count:input:output:reasoning:cache_read:cache_write
+        local total_ms prompt_count tok_input tok_output tok_reasoning cache_read cache_write
+        IFS=':' read -r total_ms prompt_count tok_input tok_output tok_reasoning cache_read cache_write <<< "$stats"
         
         if [[ "$total_ms" -gt 0 ]]; then
             local formatted_time
@@ -145,7 +183,47 @@ main() {
             fi
             
             echo "$formatted_time  ${prompt_count} prompts  $title"
-            echo "                       ($date_str)"
+            
+            # Context = new input + cached input
+            local total_context=$((tok_input + cache_read))
+            local cache_pct=0
+            [[ "$total_context" -gt 0 ]] && cache_pct=$((cache_read * 100 / total_context))
+            
+            # Input work = new + written (comparable across compaction)
+            local total_input_work=$((tok_input + cache_write))
+            
+            # Output = output + reasoning (combined work)
+            local total_output=$((tok_output + tok_reasoning))
+            
+            # Tokens per second (output / time)
+            local tokens_per_sec=0
+            [[ "$total_ms" -gt 0 ]] && tokens_per_sec=$((total_output * 1000 / total_ms))
+            
+            if [[ "$VERBOSE" == true ]]; then
+                # Verbose mode: detailed breakdown with explanations
+                echo ""
+                echo "         INPUT (tokens sent to model)"
+                printf "           context:  %s  (total per request)\n" "$(format_number "$total_context")"
+                printf "             new:    %s  (not cached, full price)\n" "$(format_number "$tok_input")"
+                printf "             cached: %s  (reused, discounted)\n" "$(format_number "$cache_read")"
+                printf "           written:  %s  (added to cache)\n" "$(format_number "$cache_write")"
+                printf "           total:    %s  (new + written, comparable metric)\n" "$(format_number "$total_input_work")"
+                echo ""
+                echo "         OUTPUT (tokens generated by model)"
+                printf "           response:  %s  (visible response)\n" "$(format_number "$tok_output")"
+                if [[ "$tok_reasoning" -gt 0 ]]; then
+                    printf "           reasoning: %s  (internal thinking)\n" "$(format_number "$tok_reasoning")"
+                fi
+                printf "           total:     %s\n" "$(format_number "$total_output")"
+                echo ""
+                printf "         CACHE HIT: %d%%\n" "$cache_pct"
+                printf "         SPEED: %s tok/s\n" "$(format_number "$tokens_per_sec")"
+            else
+                # Normal mode: compact display with comparable metrics
+                printf "         input:  %s  output: %s  (%s tok/s)\n" "$(format_number "$total_input_work")" "$(format_number "$total_output")" "$(format_number "$tokens_per_sec")"
+            fi
+            
+            echo "         ($date_str)"
             
             ((count++))
         fi

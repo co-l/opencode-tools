@@ -4,6 +4,8 @@ Show agent thinking time and token stats for opencode sessions.
 
 ## Install
 
+> **Note**: Linux only for now.
+
 ```bash
 ./install.sh
 ```

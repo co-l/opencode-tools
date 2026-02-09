@@ -1,6 +1,6 @@
 # opencode-tools
 
-A collection of tools for [opencode](https://github.com/opencode-ai/opencode).
+A collection of tools for [opencode](https://github.com/anomalyco/opencode).
 
 ## Tools
 

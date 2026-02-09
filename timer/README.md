@@ -16,6 +16,14 @@ timer          # compact view
 timer -v       # verbose view with explanations
 ```
 
+Or directly inside an opencode session:
+
+```
+!timer
+```
+
+The `!` prefix runs shell commands within the session context, and the agent sees the output.
+
 ## Output
 
 ```

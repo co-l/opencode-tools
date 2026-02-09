@@ -1,0 +1,159 @@
+#!/usr/bin/env bash
+# timer - Show agent thinking time for opencode sessions in the current directory
+
+set -euo pipefail
+
+STORAGE_DIR="${HOME}/.local/share/opencode/storage"
+SESSION_DIR="${STORAGE_DIR}/session"
+MESSAGE_DIR="${STORAGE_DIR}/message"
+PART_DIR="${STORAGE_DIR}/part"
+CWD="$(pwd)"
+
+# Format milliseconds as hh:mm:ss
+format_time() {
+    local ms=$1
+    local total_seconds=$((ms / 1000))
+    local hours=$((total_seconds / 3600))
+    local minutes=$(((total_seconds % 3600) / 60))
+    local seconds=$((total_seconds % 60))
+    printf "%02d:%02d:%02d" "$hours" "$minutes" "$seconds"
+}
+
+# Find all sessions for the current directory
+find_sessions() {
+    find "$SESSION_DIR" -name "*.json" -exec grep -l "\"directory\": \"${CWD}\"" {} \; 2>/dev/null
+}
+
+# Calculate time spent waiting for user answers to questions
+# Returns: time in ms
+get_question_wait_time() {
+    local msg_id=$1
+    local parts_dir="${PART_DIR}/${msg_id}"
+    local wait_time=0
+    
+    [[ -d "$parts_dir" ]] || { echo "0"; return; }
+    
+    for part_file in "$parts_dir"/*.json; do
+        [[ -f "$part_file" ]] || continue
+        
+        local part_type tool_name
+        part_type=$(jq -r '.type // ""' "$part_file" 2>/dev/null)
+        
+        if [[ "$part_type" == "tool" ]]; then
+            tool_name=$(jq -r '.tool // ""' "$part_file" 2>/dev/null)
+            if [[ "$tool_name" == "question" ]]; then
+                local start end
+                start=$(jq -r '.state.time.start // 0' "$part_file" 2>/dev/null)
+                end=$(jq -r '.state.time.end // 0' "$part_file" 2>/dev/null)
+                if [[ "$end" -gt 0 && "$start" -gt 0 ]]; then
+                    wait_time=$((wait_time + end - start))
+                fi
+            fi
+        fi
+    done
+    
+    echo "$wait_time"
+}
+
+# Calculate total thinking time and prompt count for a session
+# Returns: "time_ms:prompt_count"
+calculate_session_stats() {
+    local session_id=$1
+    local session_msg_dir="${MESSAGE_DIR}/${session_id}"
+    
+    if [[ ! -d "$session_msg_dir" ]]; then
+        echo "0:0"
+        return
+    fi
+    
+    local total_ms=0
+    local prompt_count=0
+    
+    for msg_file in "$session_msg_dir"/*.json; do
+        [[ -f "$msg_file" ]] || continue
+        
+        local role
+        role=$(jq -r '.role // ""' "$msg_file" 2>/dev/null)
+        
+        if [[ "$role" == "user" ]]; then
+            # Only count real prompts (have summary.title), not !command triggers
+            local has_summary
+            has_summary=$(jq -r '.summary.title // ""' "$msg_file" 2>/dev/null)
+            [[ -n "$has_summary" ]] && ((prompt_count++))
+        elif [[ "$role" == "assistant" ]]; then
+            # Ignore messages with no output tokens (e.g., !command results)
+            local tokens_output
+            tokens_output=$(jq -r '.tokens.output // 0' "$msg_file" 2>/dev/null)
+            [[ "$tokens_output" -eq 0 ]] && continue
+            
+            local time_created time_completed msg_id
+            time_created=$(jq -r '.time.created // 0' "$msg_file" 2>/dev/null)
+            time_completed=$(jq -r '.time.completed // 0' "$msg_file" 2>/dev/null)
+            msg_id=$(jq -r '.id // ""' "$msg_file" 2>/dev/null)
+            
+            if [[ "$time_completed" -gt 0 && "$time_created" -gt 0 ]]; then
+                local duration question_time
+                duration=$((time_completed - time_created))
+                # Subtract time spent waiting for user answers to questions
+                question_time=$(get_question_wait_time "$msg_id")
+                duration=$((duration - question_time))
+                [[ "$duration" -lt 0 ]] && duration=0
+                total_ms=$((total_ms + duration))
+            fi
+        fi
+    done
+    
+    echo "${total_ms}:${prompt_count}"
+}
+
+# Main
+main() {
+    local sessions
+    sessions=$(find_sessions)
+    
+    if [[ -z "$sessions" ]]; then
+        echo "No opencode session found for: $CWD"
+        exit 1
+    fi
+    
+    local count=0
+    
+    while IFS= read -r session_file; do
+        [[ -f "$session_file" ]] || continue
+        
+        local session_id title created updated total_ms
+        session_id=$(jq -r '.id' "$session_file")
+        title=$(jq -r '.title // "Untitled"' "$session_file")
+        created=$(jq -r '.time.created // 0' "$session_file")
+        updated=$(jq -r '.time.updated // 0' "$session_file")
+        
+        local stats total_ms prompt_count
+        stats=$(calculate_session_stats "$session_id")
+        total_ms="${stats%%:*}"
+        prompt_count="${stats##*:}"
+        
+        if [[ "$total_ms" -gt 0 ]]; then
+            local formatted_time
+            formatted_time=$(format_time "$total_ms")
+            
+            # Format date from timestamp
+            local date_str
+            date_str=$(date -d "@$((updated / 1000))" "+%Y-%m-%d %H:%M" 2>/dev/null || echo "unknown")
+            
+            if [[ $count -gt 0 ]]; then
+                echo ""
+            fi
+            
+            echo "$formatted_time  ${prompt_count} prompts  $title"
+            echo "                       ($date_str)"
+            
+            ((count++))
+        fi
+    done <<< "$sessions"
+    
+    if [[ $count -eq 0 ]]; then
+        echo "No thinking time found for sessions in: $CWD"
+    fi
+}
+
+main "$@"

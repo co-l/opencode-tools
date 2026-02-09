@@ -10,19 +10,20 @@ Show agent thinking time and token stats for opencode sessions.
 
 ## Usage
 
-```bash
-# In any directory with an opencode session
-timer          # compact view
-timer -v       # verbose view with explanations
-```
-
-Or directly inside an opencode session:
+Inside an opencode session:
 
 ```
 !timer
 ```
 
 The `!` prefix runs shell commands within the session context, and the agent sees the output.
+
+Or from any terminal in a directory with an opencode session:
+
+```bash
+timer          # compact view
+timer -v       # verbose view with explanations
+```
 
 ## Output
 

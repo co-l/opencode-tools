@@ -38,9 +38,11 @@ format_number() {
     printf "%'d" "$1"
 }
 
-# Find all sessions for the current directory
+# Find all sessions for the current directory, sorted by most recent first
 find_sessions() {
-    find "$SESSION_DIR" -name "*.json" -exec grep -l "\"directory\": \"${CWD}\"" {} \; 2>/dev/null
+    find "$SESSION_DIR" -name "*.json" -exec grep -l "\"directory\": \"${CWD}\"" {} \; 2>/dev/null | \
+    while read -r f; do printf '%s\t%s\n' "$(jq -r '.time.updated // 0' "$f" 2>/dev/null)" "$f"; done | \
+    sort -rn | cut -f2
 }
 
 # Calculate time spent waiting for user answers to questions

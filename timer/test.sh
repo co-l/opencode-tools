@@ -245,6 +245,96 @@ test_no_database() {
     fi
 }
 
+# Insert session with tool permission wait (bash/read/etc)
+insert_session_with_tool_permission() {
+    local now=1700000000000
+    local created=$((now - 120000))
+    local assistant_created=$((created + 1000))
+    local assistant_completed=$((created + 36000))  # 35s total message duration
+    local tool_start=$((created + 2000))
+    local tool_end=$((created + 32000))  # 30s tool wait (permission prompt)
+    
+    sqlite3 "$DB_PATH" "INSERT INTO project (id, worktree, time_created, time_updated, sandboxes) VALUES ('proj_003', '$TEST_CWD', $created, $now, '[]');"
+    sqlite3 "$DB_PATH" "INSERT INTO session VALUES ('session_003', 'proj_003', NULL, 'tool-slug', '$TEST_CWD', 'Session with Tool Permission', '1.2.0', $created, $now);"
+    
+    # User message
+    sqlite3 "$DB_PATH" "INSERT INTO message VALUES ('msg_005', 'session_003', $created, $now, '{\"role\":\"user\",\"time\":{\"created\":$created},\"summary\":{\"title\":\"User prompt\"}}');"
+    
+    # Assistant message: 35s total, but 30s was waiting for bash permission
+    sqlite3 "$DB_PATH" "INSERT INTO message VALUES ('msg_006', 'session_003', $assistant_created, $now, '{\"role\":\"assistant\",\"time\":{\"created\":$assistant_created,\"completed\":$assistant_completed},\"tokens\":{\"input\":2000,\"output\":1000,\"reasoning\":0,\"cache\":{\"read\":0,\"write\":0}},\"parentID\":\"msg_005\"}');"
+    
+    # Bash tool part: 30s wait time (user permission prompt)
+    sqlite3 "$DB_PATH" "INSERT INTO part VALUES ('part_002', 'msg_006', 'session_003', $tool_start, $now, '{\"type\":\"tool\",\"tool\":\"bash\",\"state\":{\"status\":\"completed\",\"time\":{\"start\":$tool_start,\"end\":$tool_end}}}');"
+}
+
+# Insert session with parallel tool calls requiring permission
+insert_session_with_parallel_tools() {
+    local now=1700000000000
+    local created=$((now - 120000))
+    local assistant_created=$((created + 1000))
+    local assistant_completed=$((created + 36000))  # 35s total
+    # All tools start at nearly the same time (parallel), all blocked on permission
+    local tool1_start=$((created + 2000))
+    local tool1_end=$((created + 32000))  # 30s
+    local tool2_start=$((created + 2100))
+    local tool2_end=$((created + 32050))  # 30s (overlapping)
+    local tool3_start=$((created + 2200))
+    local tool3_end=$((created + 32100))  # 30s (overlapping)
+    
+    sqlite3 "$DB_PATH" "INSERT INTO project (id, worktree, time_created, time_updated, sandboxes) VALUES ('proj_004', '$TEST_CWD', $created, $now, '[]');"
+    sqlite3 "$DB_PATH" "INSERT INTO session VALUES ('session_004', 'proj_004', NULL, 'parallel-slug', '$TEST_CWD', 'Session with Parallel Tools', '1.2.0', $created, $now);"
+    
+    # User message
+    sqlite3 "$DB_PATH" "INSERT INTO message VALUES ('msg_007', 'session_004', $created, $now, '{\"role\":\"user\",\"time\":{\"created\":$created},\"summary\":{\"title\":\"User prompt\"}}');"
+    
+    # Assistant message: 35s total, but ~30s was parallel tool permission wait
+    sqlite3 "$DB_PATH" "INSERT INTO message VALUES ('msg_008', 'session_004', $assistant_created, $now, '{\"role\":\"assistant\",\"time\":{\"created\":$assistant_created,\"completed\":$assistant_completed},\"tokens\":{\"input\":2000,\"output\":1000,\"reasoning\":0,\"cache\":{\"read\":0,\"write\":0}},\"parentID\":\"msg_007\"}');"
+    
+    # Three parallel tool calls - should be merged, not summed
+    sqlite3 "$DB_PATH" "INSERT INTO part VALUES ('part_003', 'msg_008', 'session_004', $tool1_start, $now, '{\"type\":\"tool\",\"tool\":\"bash\",\"state\":{\"status\":\"completed\",\"time\":{\"start\":$tool1_start,\"end\":$tool1_end}}}');"
+    sqlite3 "$DB_PATH" "INSERT INTO part VALUES ('part_004', 'msg_008', 'session_004', $tool2_start, $now, '{\"type\":\"tool\",\"tool\":\"glob\",\"state\":{\"status\":\"completed\",\"time\":{\"start\":$tool2_start,\"end\":$tool2_end}}}');"
+    sqlite3 "$DB_PATH" "INSERT INTO part VALUES ('part_005', 'msg_008', 'session_004', $tool3_start, $now, '{\"type\":\"tool\",\"tool\":\"grep\",\"state\":{\"status\":\"completed\",\"time\":{\"start\":$tool3_start,\"end\":$tool3_end}}}');"
+}
+
+# Test: Tool permission wait time is subtracted (single tool)
+test_tool_permission_wait_time() {
+    TESTS_RUN=$((TESTS_RUN + 1))
+    setup
+    insert_session_with_tool_permission
+    
+    output=$(cd "$TEST_CWD" && HOME="$TEST_DIR" XDG_DATA_HOME="$DATA_DIR" "$TIMER" 2>&1)
+    
+    # Total time was 35s, tool wait was 30s, so thinking time should be ~5s
+    # Output should show 00:00:05 (or close to it)
+    if [[ "$output" =~ 00:00:0[4-6] ]]; then
+        pass "tool_permission_wait: time correctly excludes tool wait"
+    else
+        fail "tool_permission_wait" "~00:00:05 (35s - 30s tool wait)" "$output"
+    fi
+    
+    teardown
+}
+
+# Test: Parallel tool permission waits are merged (not summed)
+test_parallel_tool_permission_wait() {
+    TESTS_RUN=$((TESTS_RUN + 1))
+    setup
+    insert_session_with_parallel_tools
+    
+    output=$(cd "$TEST_CWD" && HOME="$TEST_DIR" XDG_DATA_HOME="$DATA_DIR" "$TIMER" 2>&1)
+    
+    # Total time was 35s, parallel tools spanned ~30s (merged), so thinking time ~5s
+    # If tools were summed instead of merged, we'd get 35s - 90s = negative (clamped to 0)
+    # Output should show ~00:00:05, NOT 00:00:00
+    if [[ "$output" =~ 00:00:0[4-6] ]]; then
+        pass "parallel_tool_permission: time correctly merges overlapping tool waits"
+    else
+        fail "parallel_tool_permission" "~00:00:05 (merged parallel waits)" "$output"
+    fi
+    
+    teardown
+}
+
 # Test: Only shows most recent session when multiple exist
 test_single_session_output() {
     TESTS_RUN=$((TESTS_RUN + 1))
@@ -288,6 +378,8 @@ main() {
     test_no_sessions
     test_basic_session
     test_question_wait_time
+    test_tool_permission_wait_time
+    test_parallel_tool_permission_wait
     test_verbose_mode
     test_single_session_output
     

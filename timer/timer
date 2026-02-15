@@ -56,13 +56,13 @@ find_sessions() {
          LIMIT 1"
 }
 
-# Calculate time spent waiting for user answers to questions
+# Calculate time spent in tool executions (including permission waits)
+# Merges overlapping intervals for parallel tool calls
 # Returns: time in ms
-get_question_wait_time() {
+get_tool_wait_time() {
     local msg_id=$1
-    local wait_time=0
     
-    # Query parts for question tool with completed status
+    # Query all tool parts with timing
     local results
     results=$(sqlite3 -separator '|' "$DB_PATH" \
         "SELECT 
@@ -71,15 +71,41 @@ get_question_wait_time() {
          FROM part 
          WHERE message_id = '$msg_id'
            AND json_extract(data, '\$.type') = 'tool'
-           AND json_extract(data, '\$.tool') = 'question'
-           AND json_extract(data, '\$.state.status') = 'completed'" 2>/dev/null) || true
+           AND json_extract(data, '\$.state.status') = 'completed'
+           AND json_extract(data, '\$.state.time.start') IS NOT NULL
+           AND json_extract(data, '\$.state.time.end') IS NOT NULL
+         ORDER BY json_extract(data, '\$.state.time.start')" 2>/dev/null) || true
+    
+    [[ -z "$results" ]] && echo 0 && return
+    
+    # Merge overlapping intervals and sum total time
+    local total_time=0
+    local current_start=0
+    local current_end=0
     
     while IFS='|' read -r start end; do
         [[ -z "$start" || -z "$end" ]] && continue
-        [[ "$end" -gt 0 && "$start" -gt 0 ]] && wait_time=$((wait_time + end - start))
+        [[ "$start" -le 0 || "$end" -le 0 ]] && continue
+        
+        if [[ "$current_end" -eq 0 ]]; then
+            # First interval
+            current_start=$start
+            current_end=$end
+        elif [[ "$start" -le "$current_end" ]]; then
+            # Overlapping interval - extend current
+            [[ "$end" -gt "$current_end" ]] && current_end=$end
+        else
+            # Non-overlapping - add current to total and start new
+            total_time=$((total_time + current_end - current_start))
+            current_start=$start
+            current_end=$end
+        fi
     done <<< "$results"
     
-    echo "$wait_time"
+    # Add final interval
+    [[ "$current_end" -gt 0 ]] && total_time=$((total_time + current_end - current_start))
+    
+    echo "$total_time"
 }
 
 # Calculate total thinking time, prompt count, and token stats for a session
@@ -138,11 +164,11 @@ calculate_session_stats() {
             last_cache_read=${cache_read:-0}
             
             if [[ -n "$time_completed" && "$time_completed" != "null" && -n "$time_created" && "$time_created" != "null" ]]; then
-                local duration question_time
+                local duration tool_time
                 duration=$((time_completed - time_created))
-                # Subtract time spent waiting for user answers to questions
-                question_time=$(get_question_wait_time "$msg_id")
-                duration=$((duration - question_time))
+                # Subtract time spent in tool executions (includes permission waits)
+                tool_time=$(get_tool_wait_time "$msg_id")
+                duration=$((duration - tool_time))
                 [[ "$duration" -lt 0 ]] && duration=0
                 total_ms=$((total_ms + duration))
             fi

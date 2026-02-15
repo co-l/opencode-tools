@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # timer - Show agent thinking time for opencode sessions in the current directory
+# Requires: sqlite3, opencode v1.2.0+
 
 set -euo pipefail
 
-STORAGE_DIR="${HOME}/.local/share/opencode/storage"
-SESSION_DIR="${STORAGE_DIR}/session"
-MESSAGE_DIR="${STORAGE_DIR}/message"
-PART_DIR="${STORAGE_DIR}/part"
+# Support XDG_DATA_HOME for testing, fall back to default
+DATA_DIR="${XDG_DATA_HOME:-${HOME}/.local/share/opencode}"
+DB_PATH="${DATA_DIR}/opencode.db"
 CWD="$(pwd)"
 VERBOSE=false
 
@@ -23,6 +23,13 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Check database exists
+if [[ ! -f "$DB_PATH" ]]; then
+    echo "Database not found: $DB_PATH"
+    echo "Make sure you're running opencode v1.2.0+ which uses SQLite storage."
+    exit 1
+fi
+
 # Format milliseconds as hh:mm:ss
 format_time() {
     local ms=$1
@@ -38,98 +45,99 @@ format_number() {
     printf "%'d" "$1"
 }
 
-# Find all sessions for the current directory, sorted by most recent first
+# Find the most recent session for the current directory
+# Returns: id|title|time_created|time_updated (pipe-separated)
 find_sessions() {
-    find "$SESSION_DIR" -name "*.json" -exec grep -l "\"directory\": \"${CWD}\"" {} \; 2>/dev/null | \
-    while read -r f; do printf '%s\t%s\n' "$(jq -r '.time.updated // 0' "$f" 2>/dev/null)" "$f"; done | \
-    sort -rn | cut -f2
+    sqlite3 -separator '|' "$DB_PATH" \
+        "SELECT id, title, time_created, time_updated 
+         FROM session 
+         WHERE directory = '$CWD' 
+         ORDER BY time_updated DESC
+         LIMIT 1"
 }
 
 # Calculate time spent waiting for user answers to questions
 # Returns: time in ms
 get_question_wait_time() {
     local msg_id=$1
-    local parts_dir="${PART_DIR}/${msg_id}"
     local wait_time=0
     
-    [[ -d "$parts_dir" ]] || { echo "0"; return; }
+    # Query parts for question tool with completed status
+    local results
+    results=$(sqlite3 -separator '|' "$DB_PATH" \
+        "SELECT 
+            json_extract(data, '\$.state.time.start'),
+            json_extract(data, '\$.state.time.end')
+         FROM part 
+         WHERE message_id = '$msg_id'
+           AND json_extract(data, '\$.type') = 'tool'
+           AND json_extract(data, '\$.tool') = 'question'
+           AND json_extract(data, '\$.state.status') = 'completed'" 2>/dev/null) || true
     
-    for part_file in "$parts_dir"/*.json; do
-        [[ -f "$part_file" ]] || continue
-        
-        local part_type tool_name
-        part_type=$(jq -r '.type // ""' "$part_file" 2>/dev/null)
-        
-        if [[ "$part_type" == "tool" ]]; then
-            tool_name=$(jq -r '.tool // ""' "$part_file" 2>/dev/null)
-            if [[ "$tool_name" == "question" ]]; then
-                local start end
-                start=$(jq -r '.state.time.start // 0' "$part_file" 2>/dev/null)
-                end=$(jq -r '.state.time.end // 0' "$part_file" 2>/dev/null)
-                if [[ "$end" -gt 0 && "$start" -gt 0 ]]; then
-                    wait_time=$((wait_time + end - start))
-                fi
-            fi
-        fi
-    done
+    while IFS='|' read -r start end; do
+        [[ -z "$start" || -z "$end" ]] && continue
+        [[ "$end" -gt 0 && "$start" -gt 0 ]] && wait_time=$((wait_time + end - start))
+    done <<< "$results"
     
     echo "$wait_time"
 }
 
 # Calculate total thinking time, prompt count, and token stats for a session
-# Returns: "time_ms:prompt_count:input:output:reasoning:cache_read:cache_write"
+# Returns: "time_ms:prompt_count:output:reasoning:last_input:last_cache_read:cache_rebuilds"
 calculate_session_stats() {
     local session_id=$1
-    local session_msg_dir="${MESSAGE_DIR}/${session_id}"
-    
-    if [[ ! -d "$session_msg_dir" ]]; then
-        echo "0:0:0:0:0:0:0"
-        return
-    fi
     
     local total_ms=0
     local prompt_count=0
-    local total_input=0
     local total_output=0
     local total_reasoning=0
-    local total_cache_read=0
-    local total_cache_write=0
+    local last_input=0
+    local last_cache_read=0
+    local prev_cache_read=0
+    local cache_rebuilds=0
     
-    for msg_file in "$session_msg_dir"/*.json; do
-        [[ -f "$msg_file" ]] || continue
-        
-        local role
-        role=$(jq -r '.role // ""' "$msg_file" 2>/dev/null)
+    # Query all messages for this session
+    local results
+    results=$(sqlite3 -separator '|' "$DB_PATH" \
+        "SELECT 
+            id,
+            json_extract(data, '\$.role'),
+            json_extract(data, '\$.time.created'),
+            json_extract(data, '\$.time.completed'),
+            COALESCE(json_extract(data, '\$.tokens.output'), 0),
+            COALESCE(json_extract(data, '\$.tokens.reasoning'), 0),
+            COALESCE(json_extract(data, '\$.tokens.input'), 0),
+            COALESCE(json_extract(data, '\$.tokens.cache.read'), 0),
+            json_extract(data, '\$.summary.title')
+         FROM message 
+         WHERE session_id = '$session_id'
+         ORDER BY time_created" 2>/dev/null) || true
+    
+    while IFS='|' read -r msg_id role time_created time_completed tok_output tok_reasoning tok_input cache_read summary_title; do
+        [[ -z "$role" ]] && continue
         
         if [[ "$role" == "user" ]]; then
             # Only count real prompts (have summary.title), not !command triggers
-            local has_summary
-            has_summary=$(jq -r '.summary.title // ""' "$msg_file" 2>/dev/null)
-            [[ -n "$has_summary" ]] && ((prompt_count++))
+            [[ -n "$summary_title" && "$summary_title" != "null" ]] && prompt_count=$((prompt_count + 1))
         elif [[ "$role" == "assistant" ]]; then
             # Ignore messages with no output tokens (e.g., !command results)
-            local tokens_output tokens_input tokens_reasoning cache_read cache_write
-            tokens_input=$(jq -r '.tokens.input // 0' "$msg_file" 2>/dev/null)
-            tokens_output=$(jq -r '.tokens.output // 0' "$msg_file" 2>/dev/null)
-            tokens_reasoning=$(jq -r '.tokens.reasoning // 0' "$msg_file" 2>/dev/null)
-            cache_read=$(jq -r '.tokens.cache.read // 0' "$msg_file" 2>/dev/null)
-            cache_write=$(jq -r '.tokens.cache.write // 0' "$msg_file" 2>/dev/null)
+            [[ "${tok_output:-0}" -eq 0 ]] && continue
             
-            [[ "$tokens_output" -eq 0 ]] && continue
+            # Accumulate output totals
+            total_output=$((total_output + ${tok_output:-0}))
+            total_reasoning=$((total_reasoning + ${tok_reasoning:-0}))
             
-            # Accumulate token stats
-            total_input=$((total_input + tokens_input))
-            total_output=$((total_output + tokens_output))
-            total_reasoning=$((total_reasoning + tokens_reasoning))
-            total_cache_read=$((total_cache_read + cache_read))
-            total_cache_write=$((total_cache_write + cache_write))
+            # Detect cache rebuild (cache_read drops significantly from previous)
+            if [[ "$prev_cache_read" -gt 0 && "$cache_read" -lt $((prev_cache_read - 10000)) ]]; then
+                cache_rebuilds=$((cache_rebuilds + 1))
+            fi
+            prev_cache_read=${cache_read:-0}
             
-            local time_created time_completed msg_id
-            time_created=$(jq -r '.time.created // 0' "$msg_file" 2>/dev/null)
-            time_completed=$(jq -r '.time.completed // 0' "$msg_file" 2>/dev/null)
-            msg_id=$(jq -r '.id // ""' "$msg_file" 2>/dev/null)
+            # Track last message's context
+            last_input=${tok_input:-0}
+            last_cache_read=${cache_read:-0}
             
-            if [[ "$time_completed" -gt 0 && "$time_created" -gt 0 ]]; then
+            if [[ -n "$time_completed" && "$time_completed" != "null" && -n "$time_created" && "$time_created" != "null" ]]; then
                 local duration question_time
                 duration=$((time_completed - time_created))
                 # Subtract time spent waiting for user answers to questions
@@ -139,9 +147,9 @@ calculate_session_stats() {
                 total_ms=$((total_ms + duration))
             fi
         fi
-    done
+    done <<< "$results"
     
-    echo "${total_ms}:${prompt_count}:${total_input}:${total_output}:${total_reasoning}:${total_cache_read}:${total_cache_write}"
+    echo "${total_ms}:${prompt_count}:${total_output}:${total_reasoning}:${last_input}:${last_cache_read}:${cache_rebuilds}"
 }
 
 # Main
@@ -156,21 +164,15 @@ main() {
     
     local count=0
     
-    while IFS= read -r session_file; do
-        [[ -f "$session_file" ]] || continue
-        
-        local session_id title created updated total_ms
-        session_id=$(jq -r '.id' "$session_file")
-        title=$(jq -r '.title // "Untitled"' "$session_file")
-        created=$(jq -r '.time.created // 0' "$session_file")
-        updated=$(jq -r '.time.updated // 0' "$session_file")
+    while IFS='|' read -r session_id title time_created time_updated; do
+        [[ -z "$session_id" ]] && continue
         
         local stats
         stats=$(calculate_session_stats "$session_id")
         
-        # Parse stats: time_ms:prompt_count:input:output:reasoning:cache_read:cache_write
-        local total_ms prompt_count tok_input tok_output tok_reasoning cache_read cache_write
-        IFS=':' read -r total_ms prompt_count tok_input tok_output tok_reasoning cache_read cache_write <<< "$stats"
+        # Parse stats: time_ms:prompt_count:output:reasoning:last_input:last_cache_read:cache_rebuilds
+        local total_ms prompt_count tok_output tok_reasoning last_input last_cache_read cache_rebuilds
+        IFS=':' read -r total_ms prompt_count tok_output tok_reasoning last_input last_cache_read cache_rebuilds <<< "$stats"
         
         if [[ "$total_ms" -gt 0 ]]; then
             local formatted_time
@@ -178,7 +180,7 @@ main() {
             
             # Format date from timestamp
             local date_str
-            date_str=$(date -d "@$((updated / 1000))" "+%Y-%m-%d %H:%M" 2>/dev/null || echo "unknown")
+            date_str=$(date -d "@$((time_updated / 1000))" "+%Y-%m-%d %H:%M" 2>/dev/null || echo "unknown")
             
             if [[ $count -gt 0 ]]; then
                 echo ""
@@ -186,13 +188,10 @@ main() {
             
             echo "$formatted_time  ${prompt_count} prompts  $title"
             
-            # Context = new input + cached input
-            local total_context=$((tok_input + cache_read))
+            # Current context = last message's (input + cache_read)
+            local current_context=$((last_input + last_cache_read))
             local cache_pct=0
-            [[ "$total_context" -gt 0 ]] && cache_pct=$((cache_read * 100 / total_context))
-            
-            # Input work = new + written (comparable across compaction)
-            local total_input_work=$((tok_input + cache_write))
+            [[ "$current_context" -gt 0 ]] && cache_pct=$((last_cache_read * 100 / current_context))
             
             # Output = output + reasoning (combined work)
             local total_output=$((tok_output + tok_reasoning))
@@ -202,32 +201,29 @@ main() {
             [[ "$total_ms" -gt 0 ]] && tokens_per_sec=$((total_output * 1000 / total_ms))
             
             if [[ "$VERBOSE" == true ]]; then
-                # Verbose mode: detailed breakdown with explanations
+                # Verbose mode: detailed breakdown
                 echo ""
-                echo "         INPUT (tokens sent to model)"
-                printf "           context:  %s  (total per request)\n" "$(format_number "$total_context")"
-                printf "             new:    %s  (not cached, full price)\n" "$(format_number "$tok_input")"
-                printf "             cached: %s  (reused, discounted)\n" "$(format_number "$cache_read")"
-                printf "           written:  %s  (added to cache)\n" "$(format_number "$cache_write")"
-                printf "           total:    %s  (new + written, comparable metric)\n" "$(format_number "$total_input_work")"
-                echo ""
-                echo "         OUTPUT (tokens generated by model)"
-                printf "           response:  %s  (visible response)\n" "$(format_number "$tok_output")"
+                echo "         OUTPUT"
+                printf "           tokens:    %s\n" "$(format_number "$tok_output")"
                 if [[ "$tok_reasoning" -gt 0 ]]; then
-                    printf "           reasoning: %s  (internal thinking)\n" "$(format_number "$tok_reasoning")"
+                    printf "           reasoning: %s\n" "$(format_number "$tok_reasoning")"
                 fi
-                printf "           total:     %s\n" "$(format_number "$total_output")"
+                printf "           speed:     %s tok/s\n" "$(format_number "$tokens_per_sec")"
                 echo ""
-                printf "         CACHE HIT: %d%%\n" "$cache_pct"
-                printf "         SPEED: %s tok/s\n" "$(format_number "$tokens_per_sec")"
+                echo "         CONTEXT"
+                printf "           size:      %s\n" "$(format_number "$current_context")"
+                printf "           cached:    %d%%\n" "$cache_pct"
+                if [[ "$cache_rebuilds" -gt 0 ]]; then
+                    printf "           rebuilds: %d\n" "$cache_rebuilds"
+                fi
             else
-                # Normal mode: compact display with comparable metrics
-                printf "         input:  %s  output: %s  (%s tok/s)\n" "$(format_number "$total_input_work")" "$(format_number "$total_output")" "$(format_number "$tokens_per_sec")"
+                # Normal mode: compact display
+                printf "         output: %s  (%s tok/s)\n" "$(format_number "$total_output")" "$(format_number "$tokens_per_sec")"
             fi
             
             echo "         ($date_str)"
             
-            ((count++))
+            count=$((count + 1))
         fi
     done <<< "$sessions"
     

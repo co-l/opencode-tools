@@ -2,6 +2,24 @@
 
 Show agent thinking time and token stats for opencode sessions.
 
+## Requirements
+
+- **opencode v1.2.0+** (uses SQLite storage)
+- **sqlite3** CLI tool
+
+```bash
+# Debian/Ubuntu
+sudo apt install sqlite3
+
+# macOS (usually pre-installed)
+brew install sqlite3
+
+# Arch
+sudo pacman -S sqlite
+```
+
+> For opencode versions < v1.2.0 (JSON storage), use [timer v1.0.0](https://github.com/sst/opencode-plugins/tree/timer-v1.0.0/timer)
+
 ## Install
 
 > **Note**: Linux only for now.
@@ -30,14 +48,13 @@ timer -v       # verbose view with explanations
 ## Output
 
 ```
-00:17:31  27 prompts  Session title
-         input:  350,336  output: 35,800  (34 tok/s)
-         (2026-02-09 15:25)
+00:18:52  10 prompts  Session title
+         output: 56,161  (49 tok/s)
+         (2026-02-15 11:39)
 ```
 
 - **Time**: Agent thinking time (excludes waiting for user input)
 - **Prompts**: Number of user messages
-- **Input**: Tokens sent (new + written to cache, comparable across compaction)
 - **Output**: Tokens generated (response + reasoning)
 - **tok/s**: Generation speed
 
@@ -47,4 +64,22 @@ timer -v       # verbose view with explanations
 timer -v
 ```
 
-Shows detailed breakdown of context, cache hit %, and token categories.
+Shows detailed breakdown:
+
+```
+00:18:57  10 prompts  Session title
+
+         OUTPUT
+           tokens:    56,262
+           speed:     49 tok/s
+
+         CONTEXT
+           size:      143,732
+           cached:    99%
+           rebuilds:  4
+         (2026-02-15 11:39)
+```
+
+- **OUTPUT**: Total tokens generated and speed
+- **CONTEXT**: Current context window size and cache efficiency
+- **rebuilds**: Cache invalidations (TTL expiry, costs extra)

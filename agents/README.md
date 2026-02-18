@@ -18,3 +18,20 @@ Optional environment variables:
 
 - `OPENCODE_CONFIG_DIR` to override the target config path
 - `CODEHEALTH_MODEL` to override the default model (`openai/gpt-5.3-codex`)
+
+## CodeReviewer
+
+Install or remove a global `@CodeReviewer` subagent and `/review` command.
+
+```bash
+# install
+./CodeReviewer.sh
+
+# uninstall
+./CodeReviewer.sh uninstall
+```
+
+Optional environment variables:
+
+- `OPENCODE_CONFIG_DIR` to override the target config path
+- `CODEREVIEWER_MODEL` to override the default model (`openai/gpt-5.3-codex`)

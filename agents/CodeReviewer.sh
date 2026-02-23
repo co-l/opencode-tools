@@ -35,7 +35,10 @@ write_agent_file() {
 
   cat > "$AGENT_FILE" <<EOF
 ---
-description: Reviews uncommitted changes with actionable pre-commit feedback
+description: |
+  Reviews uncommitted changes with actionable pre-commit feedback.
+  IMPORTANT: When iterating (review -> fix -> review), reuse the task_id from 
+  the first call to maintain context and avoid re-analyzing unchanged code.
 mode: subagent
 model: ${MODEL}
 temperature: 0.1

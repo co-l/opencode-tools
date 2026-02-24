@@ -35,3 +35,20 @@ Optional environment variables:
 
 - `OPENCODE_CONFIG_DIR` to override the target config path
 - `CODEREVIEWER_MODEL` to override the default model (`openai/gpt-5.3-codex`)
+
+## CodeSimplifier
+
+Install or remove a global `@CodeSimplifier` subagent and `/simplify` command.
+
+```bash
+# install
+./CodeSimplifier.sh
+
+# uninstall
+./CodeSimplifier.sh uninstall
+```
+
+Optional environment variables:
+
+- `OPENCODE_CONFIG_DIR` to override the target config path
+- `CODESIMPLIFIER_MODEL` to override the default model (`openai/gpt-5.3-codex`)

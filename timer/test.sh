@@ -98,8 +98,8 @@ insert_basic_session() {
     sqlite3 "$DB_PATH" "INSERT INTO project (id, worktree, time_created, time_updated, sandboxes) VALUES ('proj_001', '$TEST_CWD', $created, $now, '[]');"
     sqlite3 "$DB_PATH" "INSERT INTO session VALUES ('session_001', 'proj_001', NULL, 'test-slug', '$TEST_CWD', '$session_title', '1.2.0', $created, $now);"
     
-    # User message with summary.title (counts as prompt)
-    sqlite3 "$DB_PATH" "INSERT INTO message VALUES ('msg_001', 'session_001', $created, $now, '{\"role\":\"user\",\"time\":{\"created\":$created},\"summary\":{\"title\":\"User prompt\"}}');"
+    # User message with modern schema (no summary.title, has agent field)
+    sqlite3 "$DB_PATH" "INSERT INTO message VALUES ('msg_001', 'session_001', $created, $now, '{\"role\":\"user\",\"time\":{\"created\":$created},\"summary\":{\"diffs\":[]},\"agent\":\"build\"}');"
     
     # Assistant message with tokens and timing (10 seconds thinking time)
     sqlite3 "$DB_PATH" "INSERT INTO message VALUES ('msg_002', 'session_001', $assistant_created, $now, '{\"role\":\"assistant\",\"time\":{\"created\":$assistant_created,\"completed\":$assistant_completed},\"tokens\":{\"input\":1000,\"output\":500,\"reasoning\":100,\"cache\":{\"read\":800,\"write\":200}},\"parentID\":\"msg_001\"}');"
@@ -117,8 +117,8 @@ insert_session_with_question() {
     sqlite3 "$DB_PATH" "INSERT INTO project (id, worktree, time_created, time_updated, sandboxes) VALUES ('proj_002', '$TEST_CWD', $created, $now, '[]');"
     sqlite3 "$DB_PATH" "INSERT INTO session VALUES ('session_002', 'proj_002', NULL, 'question-slug', '$TEST_CWD', 'Session with Question', '1.2.0', $created, $now);"
     
-    # User message
-    sqlite3 "$DB_PATH" "INSERT INTO message VALUES ('msg_003', 'session_002', $created, $now, '{\"role\":\"user\",\"time\":{\"created\":$created},\"summary\":{\"title\":\"User prompt\"}}');"
+    # User message (modern schema)
+    sqlite3 "$DB_PATH" "INSERT INTO message VALUES ('msg_003', 'session_002', $created, $now, '{\"role\":\"user\",\"time\":{\"created\":$created},\"agent\":\"build\"}');"
     
     # Assistant message: 30s total, but 10s was waiting for question answer
     sqlite3 "$DB_PATH" "INSERT INTO message VALUES ('msg_004', 'session_002', $assistant_created, $now, '{\"role\":\"assistant\",\"time\":{\"created\":$assistant_created,\"completed\":$assistant_completed},\"tokens\":{\"input\":2000,\"output\":1000,\"reasoning\":0,\"cache\":{\"read\":0,\"write\":0}},\"parentID\":\"msg_003\"}');"
@@ -160,11 +160,11 @@ test_basic_session() {
     fi
     
     TESTS_RUN=$((TESTS_RUN + 1))
-    # Should contain prompt count
-    if [[ "$output" =~ [0-9]+\ prompt ]]; then
-        pass "basic_session: prompt count present"
+    # Should contain prompt count > 0 (not "0 prompts")
+    if [[ "$output" =~ [1-9][0-9]*\ prompt ]]; then
+        pass "basic_session: prompt count > 0"
     else
-        fail "basic_session: prompt count" "N prompts" "$output"
+        fail "basic_session: prompt count > 0" "N prompts where N > 0" "$output"
     fi
     
     TESTS_RUN=$((TESTS_RUN + 1))
@@ -257,8 +257,8 @@ insert_session_with_tool_permission() {
     sqlite3 "$DB_PATH" "INSERT INTO project (id, worktree, time_created, time_updated, sandboxes) VALUES ('proj_003', '$TEST_CWD', $created, $now, '[]');"
     sqlite3 "$DB_PATH" "INSERT INTO session VALUES ('session_003', 'proj_003', NULL, 'tool-slug', '$TEST_CWD', 'Session with Tool Permission', '1.2.0', $created, $now);"
     
-    # User message
-    sqlite3 "$DB_PATH" "INSERT INTO message VALUES ('msg_005', 'session_003', $created, $now, '{\"role\":\"user\",\"time\":{\"created\":$created},\"summary\":{\"title\":\"User prompt\"}}');"
+    # User message (modern schema)
+    sqlite3 "$DB_PATH" "INSERT INTO message VALUES ('msg_005', 'session_003', $created, $now, '{\"role\":\"user\",\"time\":{\"created\":$created},\"agent\":\"build\"}');"
     
     # Assistant message: 35s total, but 30s was waiting for bash permission
     sqlite3 "$DB_PATH" "INSERT INTO message VALUES ('msg_006', 'session_003', $assistant_created, $now, '{\"role\":\"assistant\",\"time\":{\"created\":$assistant_created,\"completed\":$assistant_completed},\"tokens\":{\"input\":2000,\"output\":1000,\"reasoning\":0,\"cache\":{\"read\":0,\"write\":0}},\"parentID\":\"msg_005\"}');"
@@ -284,8 +284,8 @@ insert_session_with_parallel_tools() {
     sqlite3 "$DB_PATH" "INSERT INTO project (id, worktree, time_created, time_updated, sandboxes) VALUES ('proj_004', '$TEST_CWD', $created, $now, '[]');"
     sqlite3 "$DB_PATH" "INSERT INTO session VALUES ('session_004', 'proj_004', NULL, 'parallel-slug', '$TEST_CWD', 'Session with Parallel Tools', '1.2.0', $created, $now);"
     
-    # User message
-    sqlite3 "$DB_PATH" "INSERT INTO message VALUES ('msg_007', 'session_004', $created, $now, '{\"role\":\"user\",\"time\":{\"created\":$created},\"summary\":{\"title\":\"User prompt\"}}');"
+    # User message (modern schema)
+    sqlite3 "$DB_PATH" "INSERT INTO message VALUES ('msg_007', 'session_004', $created, $now, '{\"role\":\"user\",\"time\":{\"created\":$created},\"agent\":\"build\"}');"
     
     # Assistant message: 35s total, but ~30s was parallel tool permission wait
     sqlite3 "$DB_PATH" "INSERT INTO message VALUES ('msg_008', 'session_004', $assistant_created, $now, '{\"role\":\"assistant\",\"time\":{\"created\":$assistant_created,\"completed\":$assistant_completed},\"tokens\":{\"input\":2000,\"output\":1000,\"reasoning\":0,\"cache\":{\"read\":0,\"write\":0}},\"parentID\":\"msg_007\"}');"
@@ -349,12 +349,12 @@ test_single_session_output() {
     
     # Old session
     sqlite3 "$DB_PATH" "INSERT INTO session VALUES ('session_old', 'proj_001', NULL, 'old', '$TEST_CWD', 'Old Session', '1.2.0', $old_created, $old_created);"
-    sqlite3 "$DB_PATH" "INSERT INTO message VALUES ('msg_old_1', 'session_old', $old_created, $old_created, '{\"role\":\"user\",\"time\":{\"created\":$old_created},\"summary\":{\"title\":\"Old\"}}');"
+    sqlite3 "$DB_PATH" "INSERT INTO message VALUES ('msg_old_1', 'session_old', $old_created, $old_created, '{\"role\":\"user\",\"time\":{\"created\":$old_created},\"agent\":\"build\"}');"
     sqlite3 "$DB_PATH" "INSERT INTO message VALUES ('msg_old_2', 'session_old', $((old_created+1000)), $old_created, '{\"role\":\"assistant\",\"time\":{\"created\":$((old_created+1000)),\"completed\":$((old_created+5000))},\"tokens\":{\"input\":100,\"output\":50,\"reasoning\":0,\"cache\":{\"read\":0,\"write\":0}},\"parentID\":\"msg_old_1\"}');"
     
     # New session (more recent)
     sqlite3 "$DB_PATH" "INSERT INTO session VALUES ('session_new', 'proj_001', NULL, 'new', '$TEST_CWD', 'New Session', '1.2.0', $new_created, $now);"
-    sqlite3 "$DB_PATH" "INSERT INTO message VALUES ('msg_new_1', 'session_new', $new_created, $now, '{\"role\":\"user\",\"time\":{\"created\":$new_created},\"summary\":{\"title\":\"New\"}}');"
+    sqlite3 "$DB_PATH" "INSERT INTO message VALUES ('msg_new_1', 'session_new', $new_created, $now, '{\"role\":\"user\",\"time\":{\"created\":$new_created},\"agent\":\"build\"}');"
     sqlite3 "$DB_PATH" "INSERT INTO message VALUES ('msg_new_2', 'session_new', $((new_created+1000)), $now, '{\"role\":\"assistant\",\"time\":{\"created\":$((new_created+1000)),\"completed\":$((new_created+10000))},\"tokens\":{\"input\":200,\"output\":100,\"reasoning\":0,\"cache\":{\"read\":0,\"write\":0}},\"parentID\":\"msg_new_1\"}');"
     
     output=$(cd "$TEST_CWD" && HOME="$TEST_DIR" XDG_DATA_HOME="$DATA_DIR" "$TIMER" 2>&1)

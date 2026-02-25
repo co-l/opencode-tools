@@ -133,18 +133,17 @@ calculate_session_stats() {
             COALESCE(json_extract(data, '\$.tokens.output'), 0),
             COALESCE(json_extract(data, '\$.tokens.reasoning'), 0),
             COALESCE(json_extract(data, '\$.tokens.input'), 0),
-            COALESCE(json_extract(data, '\$.tokens.cache.read'), 0),
-            json_extract(data, '\$.summary.title')
+            COALESCE(json_extract(data, '\$.tokens.cache.read'), 0)
          FROM message 
          WHERE session_id = '$session_id'
          ORDER BY time_created" 2>/dev/null) || true
     
-    while IFS='|' read -r msg_id role time_created time_completed tok_output tok_reasoning tok_input cache_read summary_title; do
+    while IFS='|' read -r msg_id role time_created time_completed tok_output tok_reasoning tok_input cache_read; do
         [[ -z "$role" ]] && continue
         
         if [[ "$role" == "user" ]]; then
-            # Only count real prompts (have summary.title), not !command triggers
-            [[ -n "$summary_title" && "$summary_title" != "null" ]] && prompt_count=$((prompt_count + 1))
+            # Count all user messages as prompts
+            prompt_count=$((prompt_count + 1))
         elif [[ "$role" == "assistant" ]]; then
             # Ignore messages with no output tokens (e.g., !command results)
             [[ "${tok_output:-0}" -eq 0 ]] && continue

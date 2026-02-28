@@ -52,3 +52,20 @@ Optional environment variables:
 
 - `OPENCODE_CONFIG_DIR` to override the target config path
 - `CODESIMPLIFIER_MODEL` to override the default model (`openai/gpt-5.3-codex`)
+
+## CodeDebugger
+
+Install or remove a global `@CodeDebugger` subagent and `/debug` command.
+
+```bash
+# install
+./CodeDebugger.sh
+
+# uninstall
+./CodeDebugger.sh uninstall
+```
+
+Optional environment variables:
+
+- `OPENCODE_CONFIG_DIR` to override the target config path
+- `CODEDEBUGGER_MODEL` to override the default model (`openai/gpt-5.3-codex`)
